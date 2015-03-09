@@ -1,14 +1,19 @@
 package app.arch.p2pclient;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.os.AsyncTask;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Message;
+import android.preference.Preference;
 import android.provider.Settings;
 import android.util.Log;
-import android.view.View;
-import android.widget.AdapterView;
-import android.widget.ArrayAdapter;
-import android.widget.ListView;
+import android.view.*;
+import android.widget.*;
 
 import de.javawi.jstun.attribute.MappedAddress;
 import de.javawi.jstun.util.UtilityException;
@@ -23,11 +28,24 @@ import java.io.IOException;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.zip.Inflater;
 
-public class MainActivity extends Activity implements AdapterView.OnItemClickListener,
-                                                      AdapterView.OnItemLongClickListener,
-                                                      StunClient.StunClientListener {
+public class MainActivity extends Activity implements StunClient.StunClientListener {
     public static final String TAG = "MainActivity";
+
+    private static final int MSG_REMOTE_DEVICE_REQUEST = 1;
+    private static final int MSG_HOLE_PUNCHING_SUCCEED = 2;
+    private static final int MSG_MESSAGE_RECEIVED = 3;
+    private static final int MSG_REGISTRATION_SUCCEED = 4;
+
+    private static final int OPTION_MENU_ITEM_REGISTER_DEVICE = Menu.FIRST;
+    private static final int OPTION_MENU_ITEM_UPDATE_DEVICE_LIST = Menu.FIRST + 1;
+    private static final int OPTION_MENU_ITEM_SETTINGS = Menu.FIRST + 2;
+
+
+    private static final int CONTEXT_MENU_ITEM_HOLE_PUNCHING = Menu.FIRST;
+    private static final int CONTEXT_MENU_ITEM_SEND_MSG = Menu.FIRST + 1;
+
     /**
      * Called when the activity is first created.
      */
@@ -37,11 +55,25 @@ public class MainActivity extends Activity implements AdapterView.OnItemClickLis
         setContentView(R.layout.main);
 
         mDeviceListView = (ListView)findViewById(R.id.device_list);
-        mDeviceListView.setOnItemClickListener(this);
-        mDeviceListView.setOnItemLongClickListener(this);
+        mDeviceListView.setOnCreateContextMenuListener(this);
 
         StunClient.getInstance().setStunClientListener(this);
-        new GetMappedAddressTask().execute();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        SharedPreferences sp = getSharedPreferences(SettingsActivity.SHARED_PREFERENCE_NAME, MODE_PRIVATE);
+
+        mStunServerAddress = sp.getString(SettingsActivity.SETTINGS_STUN_SERVER_ADDRESS, SettingsActivity.DEFAULT_STUN_SERVER_ADDRESS);
+        mStunServerPort = sp.getInt(SettingsActivity.SETTINGS_STUN_SERVER_PORT, SettingsActivity.DEFAULT_STUN_SERVER_PORT);
+
+        int registrationServerPort = sp.getInt(SettingsActivity.SETTINGS_REGISTRATION_SERVER_PORT, SettingsActivity.DEFAULT_REGISTRATION_SERVER_PORT);
+        if (registrationServerPort == -1) {
+            mRegistrationServer = "http://" + sp.getString(SettingsActivity.SETTINGS_REGISTRATION_SERVER_ADDRESS, SettingsActivity.DEFAULT_REGISTRATION_SERVER_ADDRESS);
+        } else {
+            mRegistrationServer = "http://" + sp.getString(SettingsActivity.SETTINGS_REGISTRATION_SERVER_ADDRESS, SettingsActivity.DEFAULT_REGISTRATION_SERVER_ADDRESS) + ":" + registrationServerPort;
+        }
     }
 
     @Override
@@ -51,15 +83,72 @@ public class MainActivity extends Activity implements AdapterView.OnItemClickLis
     }
 
     @Override
-    public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
-        Device device = (Device)parent.getAdapter().getItem(position);
-        new ConnectToRemoteDeviceTask().execute(device);
+    public boolean onCreateOptionsMenu(Menu menu) {
+        menu.add(0, OPTION_MENU_ITEM_REGISTER_DEVICE, 0, "Register device");
+        menu.add(0, OPTION_MENU_ITEM_UPDATE_DEVICE_LIST, 0, "Update device list");
+        menu.add(0, OPTION_MENU_ITEM_SETTINGS, 0, "Settings");
+        return true;
     }
 
     @Override
-    public boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id) {
-        Device device = (Device)parent.getAdapter().getItem(position);
-        new GetDeviceListTask().execute(mDevice);
+    public boolean onOptionsItemSelected(MenuItem item) {
+        switch (item.getItemId()) {
+            case OPTION_MENU_ITEM_REGISTER_DEVICE:
+                new GetMappedAddressTask().execute();
+                break;
+            case OPTION_MENU_ITEM_UPDATE_DEVICE_LIST:
+                new GetDeviceListTask().execute(mDevice);
+                break;
+            case OPTION_MENU_ITEM_SETTINGS:
+                startActivity(new Intent(this, SettingsActivity.class));
+                break;
+        }
+        return true;
+    }
+
+    @Override
+    public void onCreateContextMenu(ContextMenu menu, View view, ContextMenu.ContextMenuInfo menuInfo) {
+
+        menu.add(0, CONTEXT_MENU_ITEM_HOLE_PUNCHING, 0, "Hole punching");
+        menu.add(0, CONTEXT_MENU_ITEM_SEND_MSG, 0, "Send test message");
+    }
+
+    @Override
+    public boolean onContextItemSelected(MenuItem item) {
+        AdapterView.AdapterContextMenuInfo info = (AdapterView.AdapterContextMenuInfo)item.getMenuInfo();
+        final Device device = ((Device)mDeviceListView.getAdapter().getItem(info.position));
+
+        switch (item.getItemId()) {
+            case CONTEXT_MENU_ITEM_HOLE_PUNCHING:
+                new ConnectToRemoteDeviceTask().execute(device);
+                break;
+            case CONTEXT_MENU_ITEM_SEND_MSG:
+                AlertDialog.Builder builder = new AlertDialog.Builder(this);
+                builder.setTitle("Input the message");
+                final EditText editText = (EditText)LayoutInflater.from(this).inflate(R.layout.input, null);
+                builder.setView(editText);
+                builder.setPositiveButton("Send", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        new Thread() {
+                            @Override
+                            public void run() {
+                                StunClient.getInstance().testP2P(device, editText.getText().toString());
+                            }
+                        }.start();
+                        dialog.dismiss();
+                    }
+                });
+                builder.setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        dialog.cancel();
+                    }
+                });
+
+                builder.create().show();
+                break;
+        }
         return true;
     }
 
@@ -78,13 +167,29 @@ public class MainActivity extends Activity implements AdapterView.OnItemClickLis
 
     @Override
     public void onRemoteDeviceRequestReceived(MappedAddress mappedAddress) {
+        Message msg = new Message();
+        msg.what = MSG_REMOTE_DEVICE_REQUEST;
+        msg.obj = mappedAddress;
+        mHandler.sendMessage(msg);
+    }
 
+    @Override
+    public void onHolePunchingSucceed() {
+        mHandler.sendEmptyMessage(MSG_HOLE_PUNCHING_SUCCEED);
+    }
+
+    @Override
+    public void onMessageReceived(String content) {
+        Message msg = new Message();
+        msg.what = MSG_MESSAGE_RECEIVED;
+        msg.obj = content;
+        mHandler.sendMessage(msg);
     }
 
     private class GetMappedAddressTask extends AsyncTask<Void, Void, Void> {
         @Override
         protected Void doInBackground(Void... voids) {
-            StunClient.getInstance().requestMappedAddress();
+            StunClient.getInstance().requestMappedAddress(mStunServerAddress, mStunServerPort);
             return null;
         }
     }
@@ -96,7 +201,7 @@ public class MainActivity extends Activity implements AdapterView.OnItemClickLis
 
             try {
                 HttpClient hc = new HttpClient(MainActivity.this);
-                HttpResponse response = hc.get(String.format("http://usermgr.jd-app.com/register?name=%s&ip=%s&port=%d",
+                HttpResponse response = hc.get(String.format(mRegistrationServer + "/register?name=%s&ip=%s&port=%d",
                         mDevice.name, mDevice.ip, mDevice.port)).execute();
                 StringBuilder buf = new StringBuilder();
                 response.read(buf);
@@ -122,10 +227,13 @@ public class MainActivity extends Activity implements AdapterView.OnItemClickLis
         protected void onPostExecute(Boolean result) {
             super.onPostExecute(result);
             Log.d(TAG, "registered result = " + result);
-            new GetDeviceListTask().execute(mDevice);
+
+            Message msg = new Message();
+            msg.what = MSG_REGISTRATION_SUCCEED;
+            msg.obj = result;
+            mHandler.sendMessage(msg);
+            // new GetDeviceListTask().execute(mDevice);
         }
-
-
     }
 
     private class GetDeviceListTask extends AsyncTask<Device, Void, List<Device>> {
@@ -137,7 +245,7 @@ public class MainActivity extends Activity implements AdapterView.OnItemClickLis
 
             try {
                 HttpClient hc = new HttpClient(MainActivity.this);
-                HttpResponse response = hc.get("http://usermgr.jd-app.com/get").execute();
+                HttpResponse response = hc.get(mRegistrationServer + "/get").execute();
                 StringBuilder buf = new StringBuilder();
                 response.read(buf);
 
@@ -163,7 +271,9 @@ public class MainActivity extends Activity implements AdapterView.OnItemClickLis
 
         @Override
         protected void onPostExecute(List<Device> devices) {
-            mDeviceListView.setAdapter(new ArrayAdapter<Device>(MainActivity.this, R.layout.device_list_item, R.id.device_list_item, devices));
+            if (devices != null) {
+                mDeviceListView.setAdapter(new ArrayAdapter<Device>(MainActivity.this, R.layout.device_list_item, R.id.device_list_item, devices));
+            }
         }
     }
 
@@ -172,7 +282,7 @@ public class MainActivity extends Activity implements AdapterView.OnItemClickLis
         @Override
         protected Void doInBackground(Device... devices) {
             Device remoteDevice = devices[0];
-            StunClient.getInstance().connectToRemoteDevice(remoteDevice);
+            StunClient.getInstance().connectToRemoteDevice(remoteDevice, mStunServerAddress, mStunServerPort);
 
             return null;
         }
@@ -183,6 +293,29 @@ public class MainActivity extends Activity implements AdapterView.OnItemClickLis
         }
     }
 
+    Handler mHandler = new Handler() {
+        @Override
+        public void handleMessage(Message msg) {
+            switch (msg.what) {
+                case MSG_REMOTE_DEVICE_REQUEST:
+                    Toast.makeText(MainActivity.this, "remote device wants to communication!", Toast.LENGTH_LONG).show();
+                    break;
+                case MSG_HOLE_PUNCHING_SUCCEED:
+                    Toast.makeText(MainActivity.this, "Hole punching succeed!", Toast.LENGTH_LONG).show();
+                    break;
+                case MSG_MESSAGE_RECEIVED:
+                    Toast.makeText(MainActivity.this, (String)msg.obj, Toast.LENGTH_LONG).show();
+                    break;
+                case MSG_REGISTRATION_SUCCEED:
+                    Toast.makeText(MainActivity.this, "Registration status : " + (Boolean)msg.obj, Toast.LENGTH_LONG).show();
+                    break;
+            }
+        }
+    };
+
     Device mDevice;
     private ListView mDeviceListView;
+    private String mRegistrationServer;
+    private String mStunServerAddress;
+    private int mStunServerPort;
 }

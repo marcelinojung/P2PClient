@@ -13,12 +13,14 @@ import java.net.*;
 public class StunClient {
     public static final String TAG = "StunClient";
 
-    private static final String STUN_SERVER_URL = "sp.callwithus.com";
-    private static final int STUN_SERVER_PORT = 3478;
-
     public interface StunClientListener {
         public void onMappedAddressReceived(MappedAddress mappedAddress);
+
         public void onRemoteDeviceRequestReceived(MappedAddress mappedAddress);
+
+        public void onHolePunchingSucceed();
+
+        public void onMessageReceived(String msg);
     }
 
     public static synchronized StunClient getInstance() {
@@ -40,14 +42,15 @@ public class StunClient {
         mListener = listenr;
     }
 
-    public void requestMappedAddress() {
+    public void requestMappedAddress(String stunServerAddress, int stunServerPort) {
         while (!mSocket.isClosed() && mNeedRefreshMappedAddress) {
             try {
                 MessageHeader sendMH = new MessageHeader(MessageHeader.MessageHeaderType.BindingRequest);
                 sendMH.generateTransactionID();
+                sendMH.addMessageAttribute(new ChangeRequest());
 
                 byte[] data = sendMH.getBytes();
-                DatagramPacket bindingMsg = new DatagramPacket(data, data.length, InetAddress.getByName(STUN_SERVER_URL), STUN_SERVER_PORT);
+                DatagramPacket bindingMsg = new DatagramPacket(data, data.length, InetAddress.getByName(stunServerAddress), stunServerPort);
                 mSocket.send(bindingMsg);
 
                 Log.d(TAG, "Binding Request sent.");
@@ -62,13 +65,13 @@ public class StunClient {
         }
     }
 
-    public void connectToRemoteDevice(Device remoteDevice) {
-        while (!mSocket.isClosed() && mThread.isAlive()) {
+    public void connectToRemoteDevice(Device remoteDevice, String stunServerAddress, int stunServerPort) {
+        while (!mSocket.isClosed() && !mIsHolePunchingSuccessful) {
             Log.d(TAG, "Start to connect " + remoteDevice.toString());
 
             try {
                 // Send any data to remote device to open the communication channel.
-                String someData = "test";
+                String someData = "hello";
                 DatagramPacket dp = new DatagramPacket(someData.getBytes(), someData.getBytes().length, InetAddress.getByName(remoteDevice.ip), remoteDevice.port);
                 mSocket.send(dp);
                 mSocket.send(dp);
@@ -86,9 +89,10 @@ public class StunClient {
                 MessageHeader sendMH = new MessageHeader(MessageHeader.MessageHeaderType.BindingRequest);
                 sendMH.generateTransactionID();
                 sendMH.addMessageAttribute(ra);
+                sendMH.addMessageAttribute(new ChangeRequest());
 
                 byte[] data = sendMH.getBytes();
-                DatagramPacket bindingMsg = new DatagramPacket(data, data.length, InetAddress.getByName(STUN_SERVER_URL), STUN_SERVER_PORT);
+                DatagramPacket bindingMsg = new DatagramPacket(data, data.length, InetAddress.getByName(stunServerAddress), stunServerPort);
                 mSocket.send(bindingMsg);
                 Log.d(TAG, "Binding Request with RESPONSE_ADDRESS sent.");
 
@@ -106,6 +110,21 @@ public class StunClient {
             }
         }
 
+        mIsHolePunchingSuccessful = false;
+    }
+
+    public void testP2P(Device remoteDevice, String msg) {
+        if (!mSocket.isClosed()) {
+            try {
+                String testMsg = "test|" + msg;
+                DatagramPacket dp = new DatagramPacket(testMsg.getBytes(), testMsg.getBytes().length, InetAddress.getByName(remoteDevice.ip), remoteDevice.port);
+                mSocket.send(dp);
+            } catch (UnknownHostException e) {
+                e.printStackTrace();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
     }
 
     private StunClient() {
@@ -117,7 +136,7 @@ public class StunClient {
             e.printStackTrace();
         }
 
-        (mThread = new PunchingRequestListeningThread()).start();
+        new PunchingRequestListeningThread().start();
     }
 
     private class PunchingRequestListeningThread extends Thread {
@@ -131,9 +150,16 @@ public class StunClient {
                     mSocket.receive(responseMsg);
 
                     String content = new String(responseMsg.getData());
-                    if (content.equals("ok")) {
+                    if (content.startsWith("ok")) {
                         Log.d(TAG, "P2P communication OK");
-                        break;
+                        mIsHolePunchingSuccessful = true;
+                        if (mListener != null) {
+                            mListener.onHolePunchingSucceed();
+                        }
+                    } else if (content.startsWith("test|"))  {
+                        if (mListener != null) {
+                            mListener.onMessageReceived(content.substring(5));
+                        }
                     } else {
                         MessageHeader receiveMH = MessageHeader.parseHeader(responseMsg.getData());
                         receiveMH.parseAttributes(responseMsg.getData());
@@ -167,12 +193,9 @@ public class StunClient {
                                 }
 
                                 // Send back any data to remote device to open the communication channel.
-                                for (int i = 0; i < 20; i++) {
-                                    Log.d(TAG, "Send test message to device " + mappedAddress.toString() + " " + i + " times");
-                                    String someData = "ok";
-                                    mSocket.send(new DatagramPacket(someData.getBytes(), someData.getBytes().length, mappedAddress.getAddress().getInetAddress(), mappedAddress.getPort()));
-                                    Thread.sleep(500);
-                                }
+                                Log.d(TAG, "Send test message to device " + mappedAddress.toString());
+                                String someData = "ok";
+                                mSocket.send(new DatagramPacket(someData.getBytes(), someData.getBytes().length, mappedAddress.getAddress().getInetAddress(), mappedAddress.getPort()));
                             }
                         }
                     }
@@ -183,8 +206,6 @@ public class StunClient {
                 } catch (MessageAttributeParsingException e) {
                     e.printStackTrace();
                 } catch (UtilityException e) {
-                    e.printStackTrace();
-                } catch (InterruptedException e) {
                     e.printStackTrace();
                 }
             }
@@ -198,6 +219,6 @@ public class StunClient {
 
     private DatagramSocket mSocket;
     private boolean mNeedRefreshMappedAddress = true;
+    private boolean mIsHolePunchingSuccessful = false;
     private StunClientListener mListener;
-    private PunchingRequestListeningThread mThread;
 }
